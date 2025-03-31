@@ -1,0 +1,9 @@
+selenium==4.1.0
+webdriver-manager==3.5.4
+pyautogui==0.9.53
+Pillow==9.0.1
+numpy==1.22.0
+sounddevice==0.4.4
+soundfile==0.10.3.post1
+pygetwindow==0.0.9
+opencv-python==4.5.5.64
