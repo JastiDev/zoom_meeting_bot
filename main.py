@@ -11,6 +11,7 @@ import tkinter as tk
 import soundfile as sf
 import sounddevice as sd
 import pygetwindow as gw
+import tkinter.filedialog as filedialog
 from PIL import ImageGrab
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -29,24 +30,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ChromiumMeetingRecorder:
-    def __init__(self, meeting_url, meeting_type):
+    def __init__(self, meeting_url, meeting_type, save_path=None):
         self.meeting_url = meeting_url
         self.meeting_type = meeting_type
         self.driver = None
         self.is_recording = False
+        self.audio_start_time = 0
+        self.video_start_time = 0
+        self.sync_lock = threading.Lock()
+        self.video_frame = []
+        self.audio_frame = []
         self.audio_stream = None
         self.video_writer = None
         self.recording_thread = None
         self.monitoring_thread = None
-        self.temp_dir = os.path.join(os.getenv('TEMP', 'C:\\temp'), 'meeting_records')
-        os.makedirs(self.temp_dir, exist_ok=True)
+        if save_path:
+            self.save_dir = save_path
+        else:
+            self.save_dir = os.path.join(os.getenv('TEMP', 'C:\\temp'),'meeting_records')
+        os.makedirs(self.save_dir, exist_ok=True)
         self.sample_rate = 44100
         self.channels = 2
         self.video_fps = 15
         self.stop_event = threading.Event()
         self.min_participants = 2  # Minimum participants to consider meeting active
         self.empty_meeting_timeout = 30  # Seconds to wait before stopping when empty
-        self.frames = []
 
     def get_audio_devices(self):
         """List available audio input devices."""
@@ -99,7 +107,7 @@ class ChromiumMeetingRecorder:
             })
 
             # Fake video
-            fake_video = os.path.join(self.temp_dir, "fake_video.y4m")
+            fake_video = os.path.join(self.save_dir, "fake_video.y4m")
             if not os.path.exists(fake_video):
                 with open(fake_video, 'wb') as f:
                     f.write(b'YUV4MPEG2 W1280 H720 F30:1 Ip A0:0 C420jpeg XYSCSS=420JPEG\n')
@@ -156,7 +164,7 @@ class ChromiumMeetingRecorder:
                 EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Ask to join') or contains(text(), 'Join now')]"))
             )
             join_button.click()
-            time.sleep(5)
+            time.sleep(10)
             
         except Exception as e:
             logger.error(f"Google Meet error: {str(e)}")
@@ -362,6 +370,7 @@ class ChromiumMeetingRecorder:
     def _get_google_participants(self):
         """Get participant count for Google Meet."""
         try:
+            pyautogui.press('esc')
             participant_count = WebDriverWait(self.driver, 30).until(
                 EC.presence_of_element_located((By.XPATH,
                     "//div[contains(@class, 'uGOf1d')]"))
@@ -384,7 +393,6 @@ class ChromiumMeetingRecorder:
                 EC.presence_of_element_located((By.CSS_SELECTOR, "span.footer-button__number-counter > span"))
             )
             count_text = participant_count.get_attribute("textContent").strip()
-            logger.info(f"count_text: {count_text}")
             if count_text.isdigit():
                 return int(count_text)
         except:
@@ -405,7 +413,6 @@ class ChromiumMeetingRecorder:
             return 1
 
     def _start_audio_recording(self):
-        """Capture microphone audio."""
         devices = self.get_audio_devices()
         if not devices:
             raise Exception("No audio input devices found")
@@ -417,10 +424,12 @@ class ChromiumMeetingRecorder:
         if device_index is None:
             raise Exception(f"Audio device not found: {selected_device}")
         
-        self.frames = []
-        def audio_callback(indata, frames, time, status):
-            self.frames.append(indata.copy())
-        
+        self.audio_frames = []
+        def audio_callback(indata, frames, time_info, status):
+            timestamp = time_info.inputBufferAdcTime - self.audio_start_time
+            with self.sync_lock:
+                self.audio_frames.append((timestamp, indata.copy()))
+        self.audio_start_time = time.time()        
         self.audio_stream = sd.InputStream(
             device=device_index,
             channels=self.channels,
@@ -431,7 +440,8 @@ class ChromiumMeetingRecorder:
         self.audio_stream.start()
 
     def _capture_video(self):
-
+        self.video_start_time = time.time()
+        interval = 1.0 / self.video_fps
         try:            
             chrome_windows = [w for w in gw.getWindowsWithTitle('') 
                             if 'google' in w.title.lower() or 'meet' in w.title.lower() or 'app.zoom.us' in w.title.lower()]
@@ -448,29 +458,43 @@ class ChromiumMeetingRecorder:
                 height = 1036
             # Set up video writer
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            temp_video_path = os.path.join(self.save_dir, 'temp_video.mp4')
+
             self.video_writer = cv2.VideoWriter(
-                self.video_file,
+                temp_video_path,
                 fourcc,
                 self.video_fps,
                 (width, height)
             )
-            
+            next_frame_time = time.time()
             while self.is_recording and not self.stop_event.is_set():
-                try:
-                    # Capture window region
-                    img = ImageGrab.grab(bbox=(
-                        chrome_window.left,
-                        chrome_window.top,
-                        chrome_window.left + width,
-                        chrome_window.top + height
-                    ))                    
-                except Exception as e:
-                    img = ImageGrab.grab()
-                    time.sleep(0.1)
-                frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                self.video_writer.write(frame)
-                time.sleep(1 / self.video_fps)
-                    
+                now = time.time()
+                if now >= next_frame_time:
+                    try:
+                        # Capture window region
+                        img = ImageGrab.grab(bbox=(
+                            chrome_window.left,
+                            chrome_window.top,
+                            chrome_window.left + width,
+                            chrome_window.top + height
+                        ))                    
+                    except Exception as e:
+                        img = ImageGrab.grab()
+                    frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+                    if frame is None or frame.size == 0:
+                        logger.warning("Empty frame captured, skipping")
+                        continue
+                        
+                    if frame.shape[0] != height or frame.shape[1] != width:
+                        frame = cv2.resize(frame, (width, height))
+                        
+
+                    with self.sync_lock:
+                        self.video_frame.append((now - self.video_start_time, frame))
+                    self.video_writer.write(frame)
+                    next_frame_time += interval
+                time.sleep(0.001)                    
         except Exception as e:
             logger.error(f"Video capture failed: {str(e)}")
             raise
@@ -481,17 +505,21 @@ class ChromiumMeetingRecorder:
     def _merge_audio_video(self):
         """Combine audio (WAV) + video (MP4) into one file."""
         try:
-            if not (os.path.exists(self.audio_file) and os.path.exists(self.video_file)):
-                raise Exception("Audio/Video files missing")
+            temp_audio = os.path.join(self.save_dir, 'temp_audio.wav')
+            temp_video = os.path.join(self.save_dir, 'temp_video.mp4')
+            logger.info(f"temp audio and video files exist: {temp_audio} and {temp_video}")
+            audio_data = np.concatenate([af[1] for af in self.audio_frames], axis=0)
+            sf.write(temp_audio, audio_data, self.sample_rate)
             
-            # Option 1: FFmpeg (faster)
             try:
                 subprocess.run([
                     'ffmpeg', '-y',
-                    '-i', self.video_file,
-                    '-i', self.audio_file,
+                    '-i', temp_video,
+                    '-i', temp_audio,
+                    '-af', 'aresample=async=1000',  # Fixed: Space after the filter
                     '-c:v', 'copy',
                     '-c:a', 'aac',
+                    '-shortest',
                     '-strict', 'experimental',
                     self.output_file
                 ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -500,6 +528,14 @@ class ChromiumMeetingRecorder:
             except Exception as e:
                 logger.warning(f"FFmpeg not available: {str(e)}")
                 raise Exception("FFmpeg required for merging")
+            finally:
+                for f in [os.path.join(self.save_dir, 'temp_video.mp4'), 
+                          os.path.join(self.save_dir, 'temp_audio.wav')]:
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except:
+                            pass
             
         except Exception as e:
             logger.error(f"Merge failed: {str(e)}")
@@ -509,9 +545,9 @@ class ChromiumMeetingRecorder:
         """Start recording and monitoring."""
         try:
             timestamp = int(time.time())
-            self.audio_file = os.path.join(self.temp_dir, f"meeting_{timestamp}.wav")
-            self.video_file = os.path.join(self.temp_dir, f"meeting_{timestamp}.mp4")
-            self.output_file = os.path.join(self.temp_dir, f"meeting_final_{timestamp}.mp4")
+            self.audio_file = os.path.join(self.save_dir, f"meeting_{timestamp}.wav")
+            self.video_file = os.path.join(self.save_dir, f"meeting_{timestamp}.mp4")
+            self.output_file = os.path.join(self.save_dir, f"meeting_final_{timestamp}.mp4")
 
             
             self._start_audio_recording()
@@ -601,16 +637,27 @@ class MeetingRecorderUI:
         self.url_entry = tk.Entry(root, width=40)
         self.url_entry.grid(row=1, column=1, padx=10, pady=5)
         
+        tk.Label(root, text="Save Location:").grid(row=2, column=0, padx=10, pady=5, sticky='e')
+        self.save_path_entry = tk.Entry(root, width=40)
+        self.save_path_entry.grid(row=2, column=1, padx=10, pady=5)
+        self.browse_button = tk.Button(root, text="Browse", command=self.browse_folder)
+        self.browse_button.grid(row=2, column=2, padx=5, pady=5, sticky='e')
         self.start_button = tk.Button(root, text="Start Recording", command=self.start_recording)
-        self.start_button.grid(row=2, column=1, pady=10, sticky='e')
+        self.start_button.grid(row=3, column=0, columnspan=3, pady=10, padx=40, sticky='nsew') 
         
         self.status_var = tk.StringVar()
         self.status_var.set("Ready")
-        tk.Label(root, textvariable=self.status_var).grid(row=3, column=0, columnspan=2, pady=5)
+        tk.Label(root, textvariable=self.status_var).grid(row=4, column=0, columnspan=2, pady=5, sticky='nsew')
 
+    def browse_folder(self):
+        folder_selected = filedialog.askdirectory()
+        if folder_selected:
+            self.save_path_entry.delete(0, tk.END)
+            self.save_path_entry.insert(0, folder_selected)
     def start_recording(self):
         meeting_url = self.url_entry.get()
         meeting_type = self.meeting_type.get()
+        save_path = self.save_path_entry.get()
         
         if not meeting_url:
             messagebox.showerror("Error", "Meeting URL is required")
@@ -621,14 +668,14 @@ class MeetingRecorderUI:
         
         threading.Thread(
             target=self._run_recording,
-            args=(meeting_url, meeting_type),
+            args=(meeting_url, meeting_type, save_path),
             daemon=True
         ).start()
 
-    def _run_recording(self, meeting_url, meeting_type):
+    def _run_recording(self, meeting_url, meeting_type, save_path):
         recorder = None
         try:
-            recorder = ChromiumMeetingRecorder(meeting_url, meeting_type)
+            recorder = ChromiumMeetingRecorder(meeting_url, meeting_type, save_path)
             
             self.root.after(0, lambda: self.status_var.set("Setting up browser..."))
             recorder.setup_chromium_driver()
@@ -644,7 +691,7 @@ class MeetingRecorderUI:
             while recorder.is_recording:
                 time.sleep(1)
                 
-            self.root.after(0, lambda: self.status_var.set("Recording saved automatically"))
+            self.root.after(0, lambda: self.status_var.set(f"Recording saved to {save_path}"))
             
         except Exception as e:
             self.root.after(0, lambda: self.status_var.set(f"Error: {str(e)}"))
