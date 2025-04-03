@@ -5,13 +5,11 @@ import random
 import logging
 import pyautogui
 import threading
-import subprocess
+import argparse
 import numpy as np
-import tkinter as tk
 import soundfile as sf
 import sounddevice as sd
 import pygetwindow as gw
-import tkinter.filedialog as filedialog
 from PIL import ImageGrab
 from selenium import webdriver
 from moviepy.editor import AudioFileClip, VideoFileClip
@@ -21,7 +19,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
-from tkinter import ttk, messagebox
 
 # Configure logging
 logging.basicConfig(
@@ -31,9 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ChromiumMeetingRecorder:
-    def __init__(self, meeting_url, meeting_type, save_path=None):
+    def __init__(self, meeting_url, save_path=None):
         self.meeting_url = meeting_url
-        self.meeting_type = meeting_type
+        self.meeting_type = self._identify_meeting_type()
         self.driver = None
         self.is_recording = False
         self.audio_start_time = 0
@@ -45,10 +42,11 @@ class ChromiumMeetingRecorder:
         self.video_writer = None
         self.recording_thread = None
         self.monitoring_thread = None
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         if save_path:
-            self.save_dir = save_path
+            self.save_dir = os.path.abspath(save_path)
         else:
-            self.save_dir = os.path.join(os.getenv('TEMP', 'C:\\temp'),'meeting_records')
+            self.save_dir = script_dir
         os.makedirs(self.save_dir, exist_ok=True)
         self.sample_rate = 44100
         self.channels = 2
@@ -56,6 +54,18 @@ class ChromiumMeetingRecorder:
         self.stop_event = threading.Event()
         self.min_participants = 2  # Minimum participants to consider meeting active
         self.empty_meeting_timeout = 30  # Seconds to wait before stopping when empty
+
+    def _identify_meeting_type(self):
+        """Identify meeting type from URL."""
+        url = self.meeting_url.lower()
+        if 'meet.google.com' in url:
+            return 'google'
+        elif 'zoom.us' in url or 'app.zoom.us' in url:
+            return 'zoom'
+        elif 'teams.live.com' in url:
+            return 'teams'
+        else:
+            raise ValueError("Could not identify meeting type from URL")
 
     def get_audio_devices(self):
         """List available audio input devices."""
@@ -625,92 +635,29 @@ class ChromiumMeetingRecorder:
         except Exception as e:
             logger.error(f"Failed to take screenshot: {str(e)}")
 
-class MeetingRecorderUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Automatic Meeting Recorder")
-        
-        # UI Setup
-        tk.Label(root, text="Meeting Type:").grid(row=0, column=0, padx=10, pady=5, sticky='e')
-        self.meeting_type = ttk.Combobox(root, values=["google", "zoom", "teams"])
-        self.meeting_type.current(0)
-        self.meeting_type.grid(row=0, column=1, padx=10, pady=5)
-        
-        tk.Label(root, text="Meeting URL:").grid(row=1, column=0, padx=10, pady=5, sticky='e')
-        self.url_entry = tk.Entry(root, width=40)
-        self.url_entry.grid(row=1, column=1, padx=10, pady=5)
-        
-        tk.Label(root, text="Save Location:").grid(row=2, column=0, padx=10, pady=5, sticky='e')
-        self.save_path_entry = tk.Entry(root, width=40)
-        self.save_path_entry.grid(row=2, column=1, padx=10, pady=5)
-        self.browse_button = tk.Button(root, text="Browse", command=self.browse_folder)
-        self.browse_button.grid(row=2, column=2, padx=5, pady=5, sticky='e')
-        self.start_button = tk.Button(root, text="Start Recording", command=self.start_recording)
-        self.start_button.grid(row=3, column=0, columnspan=3, pady=10, padx=40, sticky='nsew') 
-        
-        self.status_var = tk.StringVar()
-        self.status_var.set("Ready")
-        tk.Label(root, textvariable=self.status_var).grid(row=4, column=0, columnspan=2, pady=5, sticky='nsew')
+def main():
+    parser = argparse.ArgumentParser(description='Automatic Meeting Recorder')
+    parser.add_argument('meeting_url', help='URL of the meeting to join')
+    parser.add_argument('--output', '-o', help='Output directory for recordings', default=None)
+    args = parser.parse_args()
 
-    def browse_folder(self):
-        folder_selected = filedialog.askdirectory()
-        if folder_selected:
-            self.save_path_entry.delete(0, tk.END)
-            self.save_path_entry.insert(0, folder_selected)
-    def start_recording(self):
-        meeting_url = self.url_entry.get()
-        meeting_type = self.meeting_type.get()
-        save_path = self.save_path_entry.get()
-        
-        if not meeting_url:
-            messagebox.showerror("Error", "Meeting URL is required")
-            return
-            
-        self.status_var.set("Starting...")
-        self.start_button.config(state=tk.DISABLED)
-        
-        threading.Thread(
-            target=self._run_recording,
-            args=(meeting_url, meeting_type, save_path),
-            daemon=True
-        ).start()
-
-    def _run_recording(self, meeting_url, meeting_type, save_path):
-        recorder = None
-        try:
-            recorder = ChromiumMeetingRecorder(meeting_url, meeting_type, save_path)
-            
-            self.root.after(0, lambda: self.status_var.set("Setting up browser..."))
-            recorder.setup_chromium_driver()
-            
-            self.root.after(0, lambda: self.status_var.set("Joining meeting..."))
-            if not recorder.join_meeting():
-                raise Exception("Failed to join meeting")
-            
-            self.root.after(0, lambda: self.status_var.set("Recording started - Will stop automatically"))
+    recorder = ChromiumMeetingRecorder(args.meeting_url, args.output)
+    try:
+        recorder.setup_chromium_driver()
+        if recorder.join_meeting():
             recorder.start_recording()
             
             # Wait for recording to complete
             while recorder.is_recording:
                 time.sleep(1)
                 
-            self.root.after(0, lambda: self.status_var.set(f"Recording saved to {save_path}"))
-            
-        except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"Error: {str(e)}"))
-            logger.error(f"Recording failed: {str(e)}")
-        finally:
-            self.root.after(0, lambda: self.start_button.config(state=tk.NORMAL))
-            if recorder:
-                try:
-                    recorder.stop_recording()
-                except:
-                    pass
-
-def main():
-    root = tk.Tk()
-    app = MeetingRecorderUI(root)
-    root.mainloop()
+            logger.info(f"Recording saved to {os.path.join(recorder.save_dir, os.path.basename(recorder.output_file))}")
+        else:
+            logger.error("Failed to join meeting")
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+    finally:
+        recorder.stop_recording()
 
 if __name__ == '__main__':
     main()
