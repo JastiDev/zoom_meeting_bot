@@ -14,6 +14,7 @@ import pygetwindow as gw
 import tkinter.filedialog as filedialog
 from PIL import ImageGrab
 from selenium import webdriver
+from moviepy.editor import AudioFileClip, VideoFileClip
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -423,7 +424,7 @@ class ChromiumMeetingRecorder:
         
         if device_index is None:
             raise Exception(f"Audio device not found: {selected_device}")
-        
+
         self.audio_frames = []
         def audio_callback(indata, frames, time_info, status):
             timestamp = time_info.inputBufferAdcTime - self.audio_start_time
@@ -507,39 +508,41 @@ class ChromiumMeetingRecorder:
         try:
             temp_audio = os.path.join(self.save_dir, 'temp_audio.wav')
             temp_video = os.path.join(self.save_dir, 'temp_video.mp4')
-            logger.info(f"temp audio and video files exist: {temp_audio} and {temp_video}")
             audio_data = np.concatenate([af[1] for af in self.audio_frames], axis=0)
             sf.write(temp_audio, audio_data, self.sample_rate)
             
-            try:
-                subprocess.run([
-                    'ffmpeg', '-y',
-                    '-i', temp_video,
-                    '-i', temp_audio,
-                    '-af', 'aresample=async=1000',  # Fixed: Space after the filter
-                    '-c:v', 'copy',
-                    '-c:a', 'aac',
-                    '-shortest',
-                    '-strict', 'experimental',
-                    self.output_file
-                ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                logger.info("Merged with FFmpeg")
-                return
-            except Exception as e:
-                logger.warning(f"FFmpeg not available: {str(e)}")
-                raise Exception("FFmpeg required for merging")
-            finally:
-                for f in [os.path.join(self.save_dir, 'temp_video.mp4'), 
-                          os.path.join(self.save_dir, 'temp_audio.wav')]:
-                    if os.path.exists(f):
-                        try:
-                            os.remove(f)
-                        except:
-                            pass
-            
+            audio_clip = AudioFileClip(temp_audio)
+            video_clip = VideoFileClip(temp_video)
+
+            final_clip = video_clip.set_audio(audio_clip)
+
+            final_clip.write_videofile(
+                self.output_file,
+                codec='libx264',
+                audio_codec='aac',
+                fps=self.video_fps,
+                threads=4,
+                logger=None
+            )
+
+            logger.info("Successfully merged with MoviePy")
         except Exception as e:
-            logger.error(f"Merge failed: {str(e)}")
+            logger.error(f"MoviePy merge failed: {str(e)}")
             raise
+        finally:
+            if 'final_clip' in locals():
+                final_clip.close()
+            if 'video_clip' in locals():
+                video_clip.close()
+            if 'audio_clip' in locals():
+                audio_clip.close()
+
+            for f in [temp_audio, temp_video]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
 
     def start_recording(self):
         """Start recording and monitoring."""
