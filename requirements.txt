@@ -1,11 +1,11 @@
 selenium==4.28.1
+webdriver-manager==4.0.2
 pyautogui==0.9.54
+opencv-python==4.11.0.86
+numpy==2.2.4
 sounddevice==0.5.1
 soundfile==0.13.1
-numpy==2.2.4
-opencv-python==4.11.0.86
-moviepy==1.0.3
 pygetwindow==0.0.9
+moviepy==1.0.3
 Pillow==10.4.0
-webdriver-manager==4.0.2
-pyaudio==0.2.14
+ffmpeg-python==0.2.0

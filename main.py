@@ -425,31 +425,72 @@ class ChromiumMeetingRecorder:
             return 1
 
     def _start_audio_recording(self):
-        devices = self.get_audio_devices()
-        if not devices:
-            raise Exception("No audio input devices found")
-        
-        # Select first available microphone
-        selected_device = next((d for d in devices if 'microphone' in d.lower()), devices[0])
-        device_index = next((i for i, d in enumerate(sd.query_devices()) if d['name'] == selected_device), None)
-        
-        if device_index is None:
-            raise Exception(f"Audio device not found: {selected_device}")
+        """Start recording system audio with proper device selection and error handling."""
+        try:
+            # Get and verify audio devices
+            devices = sd.query_devices()
+            if not devices:
+                raise RuntimeError("No audio devices found on system")
 
-        self.audio_frames = []
-        def audio_callback(indata, frames, time_info, status):
-            timestamp = time_info.inputBufferAdcTime - self.audio_start_time
-            with self.sync_lock:
-                self.audio_frames.append((timestamp, indata.copy()))
-        self.audio_start_time = time.time()        
-        self.audio_stream = sd.InputStream(
-            device=device_index,
-            channels=self.channels,
-            samplerate=self.sample_rate,
-            callback=audio_callback,
-            dtype='float32'
-        )
-        self.audio_stream.start()
+            # Find default input device if no explicit selection
+            default_input = sd.default.device[0]
+            if default_input == -1:
+                # No default input, try to find any input device
+                input_devices = [i for i, d in enumerate(devices) 
+                            if d['max_input_channels'] > 0]
+                if not input_devices:
+                    raise RuntimeError("No audio input devices available")
+                device_index = input_devices[0]
+            else:
+                device_index = default_input
+
+            # Verify the selected device
+            device_info = sd.query_devices(device_index)
+            logger.info(f"Using audio device: {device_info['name']} (Index: {device_index})")
+            logger.info(f"Device specs: {device_info['max_input_channels']} channels, "
+                    f"{device_info['default_samplerate']} Hz")
+
+            # Adjust our recording parameters to match device capabilities
+            actual_channels = min(self.channels, device_info['max_input_channels'])
+            actual_samplerate = float(device_info['default_samplerate'])
+
+            # Audio buffer setup
+            self.audio_frames = []
+            self.audio_start_time = time.time()
+            
+            def audio_callback(indata, frames, time_info, status):
+                """Callback function for audio stream."""
+                if status:
+                    logger.warning(f"Audio stream warning: {status}")
+                timestamp = time.time() - self.audio_start_time
+                with self.sync_lock:
+                    self.audio_frames.append((timestamp, indata.copy()))
+
+            # Start the stream with error handling
+            self.audio_stream = sd.InputStream(
+                device=device_index,
+                channels=actual_channels,
+                samplerate=actual_samplerate,
+                callback=audio_callback,
+                dtype='float32',
+                blocksize=1024,  # Appropriate buffer size
+                latency='high'  # Better for system audio capture
+            )
+            
+            self.audio_stream.start()
+            logger.info("Audio recording started successfully")
+            
+            # Test if we're actually getting data
+            time.sleep(0.5)  # Wait briefly for callback to trigger
+            if not self.audio_frames:
+                self.audio_stream.stop()
+                raise RuntimeError("Audio callback not receiving any data")
+
+        except Exception as e:
+            logger.error(f"Failed to start audio recording: {str(e)}")
+            if hasattr(self, 'audio_stream') and self.audio_stream:
+                self.audio_stream.close()
+            raise
 
     def _capture_video(self):
         self.video_start_time = time.time()
