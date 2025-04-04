@@ -40,7 +40,7 @@ An automated tool to record Google Meet, Zoom, and Microsoft Teams meetings usin
 ### Basic command:
 
 ```
-python meeting_recorder.py "https://meet.google.com/abc-xyz-def" --output ./recordings
+python meeting_recorder.py https://meet.google.com/abc-xyz-def --output ./recordings
 ```
 
 ### Arguments:
