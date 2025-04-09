@@ -5,7 +5,10 @@ opencv-python==4.11.0.86
 numpy==2.2.4
 sounddevice==0.5.1
 soundfile==0.13.1
-pygetwindow==0.0.9
+pygetwindow==0.0.9; sys_platform == "win32"
+pyobjc-framework-Quartz==11.0; sys_platform == "darwin"
+pyobjc-core==11.0; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=11.0; sys_platform == "darwin"
 moviepy==1.0.3
 Pillow==10.4.0
 ffmpeg-python==0.2.0
