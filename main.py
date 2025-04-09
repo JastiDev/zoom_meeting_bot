@@ -3,6 +3,7 @@ import cv2
 import time
 import random
 import logging
+import platform
 import pyautogui
 import threading
 import argparse
@@ -10,7 +11,6 @@ import subprocess
 import numpy as np
 import soundfile as sf
 import sounddevice as sd
-import pygetwindow as gw
 from PIL import ImageGrab
 from selenium import webdriver
 # from moviepy import *
@@ -21,7 +21,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Configure logging
+if platform.system().lower() == "windows":
+    import pygetwindow as gw
+elif platform.system().lower() == "darwin":
+    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionAll, kCGNullWindowID
+# Configure logging()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -113,6 +117,10 @@ class ChromiumMeetingRecorder:
             chrome_options.add_argument('--disable-popup-blocking')
             chrome_options.add_argument('--auto-accept-camera-capture')
             chrome_options.add_argument('--auto-accept-microphone-capture')
+
+            if platform.system().lower() == "darwin":
+                chrome_options.add_argument('--start-maximized')
+
             chrome_options.add_experimental_option('prefs', {
                 'webrtc.ip_handling_policy': 'default_public_interface_only',
                 'webrtc.use_legacy_tls_version': False,
@@ -158,22 +166,32 @@ class ChromiumMeetingRecorder:
 
     def _join_google_meet(self):
         """Google Meet joining logic."""
-        try:
-            mic_button = WebDriverWait(self.driver, 30).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[@aria-label='Turn off microphone']"))
+        try:            
+            mic_button = WebDriverWait(self.driver, 2000).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 
+                "div[aria-label='Turn off microphone'][role='button'], "  
+                "div[aria-label*='microphone'][role='button']"  
+            ))
             )
             mic_button.click()
             video_button = WebDriverWait(self.driver, 30).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[@aria-label='Turn off camera']"))
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 
+                "div[aria-label='Turn off camera'], "
+                "div[aria-label='Turn off camera'][role='button']"
+								))
             )
             video_button.click()
             name_input = WebDriverWait(self.driver, 30).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@aria-label='Your name']"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[aria-label='Your name'], "
+                                                "input[placeholder='Your name']"))
             )
             name_input.send_keys(f"User{random.randint(1000, 9999)}")
             
             join_button = WebDriverWait(self.driver, 30).until(
-                EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Ask to join') or contains(text(), 'Join now')]"))
+                EC.element_to_be_clickable((By.XPATH,
+                "//*[contains(text(), 'Ask to join') and "\
+                "(self::button or self::span or self::div)]"
+            	))
             )
             join_button.click()
             time.sleep(10)
@@ -385,7 +403,9 @@ class ChromiumMeetingRecorder:
             pyautogui.press('esc')
             participant_count = WebDriverWait(self.driver, 30).until(
                 EC.presence_of_element_located((By.XPATH,
-                    "//div[contains(@class, 'uGOf1d')]"))
+                    "//div[contains(@class, 'uGOf1d')] | "
+                    "//div[contains(@class, 'gFyGKf')]//div[contains(@class, 'uGOf1d')]"
+                    ))
             )
             count_text = participant_count.text.strip()
             if count_text.isdigit():
@@ -496,16 +516,26 @@ class ChromiumMeetingRecorder:
         self.video_start_time = time.time()
         interval = 1.0 / self.video_fps
         try:            
-            chrome_windows = [w for w in gw.getWindowsWithTitle('') 
+            system = platform.system().lower()
+            if system == "windows": 
+               chrome_windows = [w for w in gw.getAllTitles() 
                             if 'google' in w.title.lower() or 'meet' in w.title.lower() or 'app.zoom.us' in w.title.lower()]
-            if not chrome_windows:
-                raise Exception("Browser window not found")
+               chrome_window = chrome_windows[0]
+               if not chrome_window.isActive:
+                   chrome_window.activate()
+                   chrome_window.restore()
+                         
+            elif system == "darwin":
+               chrome_windows = self._get_mac_windows()
+               if not chrome_windows:
+                   raise Exception("No matching chrome windows found")
+               window_info = chrome_windows[0]
+               bounds = window_info.get('kCGWindowBounds', {})
+               width = int(bounds.get('width', 1680))
+               height = int(bounds.get('Height', 1050))
+               left = int(bounds.get('X', 20))
+               top = int(bounds.get('Y', 20))
             
-            chrome_window = chrome_windows[0]
-            if not chrome_window.isActive:
-                chrome_window.activate()
-                chrome_window.restore()
-            width, height = chrome_window.width, chrome_window.height
             if width <= 500 and height <= 500:
                 width = 960
                 height = 1036
@@ -554,6 +584,21 @@ class ChromiumMeetingRecorder:
         finally:
             if hasattr(self, 'video_writer') and self.video_writer:
                 self.video_writer.release()
+    
+    def _get_mac_windows(self):
+        window_list = []
+        windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID)        
+				
+        for window in windows:
+            title = window.get('kCGWindowName', '')
+            owner = window.get('kCGWindowOwnerName', '')
+            if not title or 'Google Chrome' not in owner:
+                continue
+            
+            if 'google' in title.lower() or 'meet' in title.lower() or 'zoom' in title.lower():
+                window_list.append(window)
+
+        return window_list
 
     def _merge_audio_video(self):
         """Combine audio (WAV) + video (MP4) into one file."""
